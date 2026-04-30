@@ -1,12 +1,76 @@
 import asyncio
 import json
 import os
+import threading
 import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Hashable, List, Literal, Optional
+
+
+class BenchmarkFileLogger:
+    """Real-time file logger that writes to both a unified log and per-model logs."""
+
+    def __init__(self, base_dir: str):
+        self._base = Path(base_dir)
+        self._logs_dir = self._base / "logs"
+        self._logs_dir.mkdir(parents=True, exist_ok=True)
+        self._unified_path = self._logs_dir / "all.log"
+        self._lock = threading.Lock()
+        self._model_files: Dict[str, Path] = {}
+
+    def _safe_model_filename(self, model_name: str) -> str:
+        return model_name.replace("/", "_").replace("@", "_") + ".log"
+
+    def _model_path(self, model_name: str) -> Path:
+        if model_name not in self._model_files:
+            self._model_files[model_name] = self._logs_dir / self._safe_model_filename(model_name)
+        return self._model_files[model_name]
+
+    def _timestamp(self) -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+    def _write(self, model_name: str, line: str):
+        ts = self._timestamp()
+        formatted = f"[{ts}] [{model_name}] {line}\n"
+        with self._lock:
+            with open(self._unified_path, "a") as f:
+                f.write(formatted)
+            with open(self._model_path(model_name), "a") as f:
+                f.write(f"[{ts}] {line}\n")
+
+    def task_start(self, model_name: str, strategy: str, puzzle_id: str):
+        self._write(model_name, f"START {strategy} | {puzzle_id}")
+
+    def task_end(self, model_name: str, strategy: str, puzzle_id: str, status: str, duration: float, requests: int, moves: int):
+        self._write(model_name, f"{status} {strategy} | {puzzle_id} | {duration:.1f}s | {requests} reqs | {moves} moves")
+
+    def task_skip(self, model_name: str, strategy: str, puzzle_id: str):
+        self._write(model_name, f"SKIP {strategy} | {puzzle_id} | cached")
+
+    def task_error(self, model_name: str, strategy: str, puzzle_id: str, error: str):
+        self._write(model_name, f"ERROR {strategy} | {puzzle_id} | {error}")
+
+    def task_retry(self, model_name: str, strategy: str, puzzle_id: str, attempt: int, error: str, backoff: float):
+        self._write(model_name, f"RETRY({attempt}) {strategy} | {puzzle_id} | {error} | backoff={backoff:.1f}s")
+
+    def model_response(self, model_name: str, puzzle_id: str, input_tokens: int, output_tokens: int):
+        self._write(model_name, f"RESPONSE {puzzle_id} | in={input_tokens} out={output_tokens}")
+
+    def move(self, model_name: str, puzzle_id: str, move_str: str):
+        self._write(model_name, f"MOVE {puzzle_id} | {move_str}")
+
+    def info(self, model_name: str, message: str):
+        self._write(model_name, message)
+
+    def global_info(self, message: str):
+        ts = self._timestamp()
+        formatted = f"[{ts}] [SYSTEM] {message}\n"
+        with self._lock:
+            with open(self._unified_path, "a") as f:
+                f.write(formatted)
 
 
 @dataclass
@@ -79,6 +143,19 @@ class RunResult:
     error_type: Optional[str] = None
     exception_traceback: Optional[str] = None
 
+    # Arc-explainer style enrichment
+    run_number: int = 0
+    total_steps: int = 0
+    max_steps: Optional[int] = None
+    final_score: float = 0.0  # 0.0 or 1.0
+    final_score_pct: int = 0  # 0 or 100
+    solved: bool = False
+    cost_usd: Optional[float] = None
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_reasoning_tokens: int = 0
+    reset_count: int = 0
+
 
 @dataclass
 class DetailedRunResult:
@@ -94,6 +171,153 @@ class DetailedRunResult:
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), default=str)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Trajectory types (arc-explainer style)
+# ─────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class StepRecord:
+    """Per-step trajectory record — one entry per model request cycle."""
+
+    run_id: str
+    model: str
+    puzzle_id: str
+    puzzle_type: str
+    run_number: int
+    step: int
+
+    action: str  # tool call or model output text (summarized)
+    score: float  # 0.0–1.0 (binary for pencil puzzles: 0 or 1)
+    score_pct: int  # 0–100
+    done: bool
+    state: str  # NOT_PLAYED | NOT_FINISHED | WIN | GAME_OVER
+
+    cumulative_cost_usd: Optional[float] = None
+    step_cost_usd: Optional[float] = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
+    cached_input_tokens: int = 0
+
+    observation: str = ""  # board state or tool result after action
+    reasoning: str = ""  # model reasoning/thinking text if available
+    board_state: str = ""  # string repr of puzzle at this step
+    moves_so_far: List[str] = field(default_factory=list)
+
+
+@dataclass
+class RunRecord:
+    """Per-run summary — one entry per (model × puzzle × run_number)."""
+
+    run_id: str
+    model: str
+    puzzle_id: str
+    puzzle_type: str
+    run_number: int
+
+    total_steps: int
+    max_steps: Optional[int]
+    final_score: float  # 0.0 or 1.0 for pencil puzzles
+    final_score_pct: int  # 0 or 100
+    solved: bool
+
+    cost_usd: Optional[float] = None
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_reasoning_tokens: int = 0
+    elapsed_seconds: float = 0.0
+
+    error: Optional[str] = None
+    strategy_id: str = ""
+    seed: Optional[int] = None
+    reset_count: int = 0
+    total_moves: int = 0
+    parsed_moves: List[str] = field(default_factory=list)
+
+
+@dataclass
+class TraceHeader:
+    """First line of a trace JSONL file."""
+
+    type: str = "header"
+    schema_version: str = "1.0"
+    run_id: str = ""
+    model: str = ""
+    puzzle_id: str = ""
+    puzzle_type: str = ""
+    run_number: int = 0
+    seed: Optional[int] = None
+    max_steps: Optional[int] = None
+    system_prompt: str = ""
+    timestamp: str = ""
+    strategy_id: str = ""
+
+
+@dataclass
+class TraceStep:
+    """Per-step line in trace JSONL."""
+
+    type: str = "step"
+    step: int = 0
+    action: str = ""
+    score: float = 0.0
+    score_pct: int = 0
+    done: bool = False
+    state: str = "NOT_FINISHED"
+    observation: str = ""
+    reasoning: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
+    cached_input_tokens: int = 0
+    step_cost_usd: Optional[float] = None
+    cumulative_cost_usd: Optional[float] = None
+    board_state: str = ""
+    moves_so_far: List[str] = field(default_factory=list)
+
+
+@dataclass
+class TraceSummary:
+    """Final line of a trace JSONL file."""
+
+    type: str = "summary"
+    total_steps: int = 0
+    final_score: float = 0.0
+    final_score_pct: int = 0
+    solved: bool = False
+    cost_usd: Optional[float] = None
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_reasoning_tokens: int = 0
+    elapsed_seconds: float = 0.0
+    error: Optional[str] = None
+    total_moves: int = 0
+    reset_count: int = 0
+
+
+class TraceWriter:
+    """Writes arc-explainer style trace JSONL files (header → steps → summary)."""
+
+    def __init__(self, path: Path):
+        self._path = path
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text("")
+
+    def _append(self, data: dict):
+        with open(self._path, "a") as f:
+            f.write(json.dumps(data, default=str) + "\n")
+
+    def write_header(self, header: TraceHeader):
+        self._append(asdict(header))
+
+    def write_step(self, step: TraceStep):
+        self._append(asdict(step))
+
+    def write_summary(self, summary: TraceSummary):
+        self._append(asdict(summary))
 
 
 class TaskPool:

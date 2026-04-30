@@ -12,6 +12,8 @@ Supports provider/model@variant syntax:
     openrouter/qwen/qwen3-coder           -> OpenRouter via OpenAI-compatible API
     xai/grok-4-1-fast       -> xAI via OpenAI-compatible API
     google/gemini-3-pro     -> Google Gemini API
+    bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0  -> AWS Bedrock Converse API
+    glm/glm-4-plus          -> Zhipu AI GLM API (OpenAI-compatible)
     local/my-model           -> Local OpenAI-compatible server (e.g., LM Studio, ollama)
 """
 
@@ -35,6 +37,7 @@ API_KEY_ENV = {
     "google": "GOOGLE_API_KEY",
     "xai": "XAI_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
+    "glm": "GLM_API_KEY",
 }
 
 # Models that don't support tool calling (strategies that require tools will skip these)
@@ -83,13 +86,17 @@ def get_model(name: str) -> Any:
         return _build_google(parts[1], variant)
     elif provider == "local":
         return _build_local(parts[1], variant)
+    elif provider == "bedrock":
+        return _build_bedrock(parts[1], variant)
+    elif provider == "glm":
+        return _build_glm(parts[1], variant)
     elif provider in OPENAI_COMPATIBLE_PROVIDERS:
         # xai, openrouter — use OpenAI-compatible API
         return _build_openai_compatible(provider, parts[1], variant)
     else:
         raise ValueError(
             f"Unknown provider: {provider}. "
-            f"Supported: openai, anthropic, google, xai, openrouter, local"
+            f"Supported: openai, anthropic, google, bedrock, glm, xai, openrouter, local"
         )
 
 
@@ -251,6 +258,47 @@ def _build_local(model_name: str, variant: str | None):
         base_url=base_url,
         api_key=api_key,
         max_retries=3,
+    )
+
+    return OpenAIChatModel(
+        model_name=model_name,
+        provider=OpenAIProvider(openai_client=client),
+        settings=ModelSettings(timeout=GLOBAL_TIMEOUT),
+    )
+
+
+def _build_bedrock(model_name: str, variant: str | None):
+    from pydantic_ai.models.bedrock import BedrockConverseModel, BedrockModelSettings
+    from pydantic_ai.providers.bedrock import BedrockProvider
+
+    region = os.environ.get("BEDROCK_REGION") or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+    provider = BedrockProvider(region_name=region)
+
+    settings_kwargs: dict[str, Any] = {"timeout": GLOBAL_TIMEOUT}
+
+    inference_profile = os.environ.get("BEDROCK_INFERENCE_PROFILE")
+    if inference_profile:
+        settings_kwargs["bedrock_inference_profile"] = inference_profile
+
+    return BedrockConverseModel(
+        model_name,
+        provider=provider,
+        settings=BedrockModelSettings(**settings_kwargs),
+    )
+
+
+def _build_glm(model_name: str, variant: str | None):
+    from pydantic_ai.models.openai import OpenAIChatModel
+    from pydantic_ai.providers.openai import AsyncOpenAI, OpenAIProvider
+
+    api_key = os.environ.get("GLM_API_KEY")
+    if not api_key:
+        raise EnvironmentError("GLM_API_KEY environment variable is required for GLM/Zhipu models")
+
+    client = AsyncOpenAI(
+        base_url="https://open.bigmodel.cn/api/paas/v4/",
+        api_key=api_key,
+        max_retries=5,
     )
 
     return OpenAIChatModel(

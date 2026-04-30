@@ -21,7 +21,12 @@ Or run the included example:
 import asyncio
 import random
 import time
+from pathlib import Path
 from typing import Type
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from ppbench import Puzzle, load_dataset
 
@@ -30,11 +35,18 @@ from .model_list import get_model, supports_tools
 from .strategies import BasicAgenticSolve, DirectAskStrategy
 from .strategy import AgentConfig, Strategy, StrategyResult
 from .utils import (
+    BenchmarkFileLogger,
     DetailedRunResult,
+    RunRecord,
     RunResult,
+    StepRecord,
     StorageManager,
     TaskPool,
     TokenUsage,
+    TraceHeader,
+    TraceStep,
+    TraceSummary,
+    TraceWriter,
 )
 
 
@@ -48,6 +60,8 @@ async def run(
     concurrency: int = 10,
     output_dir: str = "output/runs",
     seed: int | None = None,
+    max_steps: int | None = None,
+    runs: int = 1,
 ) -> list[DetailedRunResult]:
     """
     Run the benchmark.
@@ -106,14 +120,22 @@ async def run(
     print(f"Loaded {len(records)} puzzles from {source}")
     print(f"Models: {models}")
     print(f"Strategies: {[s.__name__ for s in strategies]}")
-    print(f"Total tasks: {len(records) * len(models) * len(strategies)}")
+    if max_steps:
+        print(f"Max steps per puzzle: {max_steps}")
+    if runs > 1:
+        print(f"Runs per combo: {runs}")
+    print(f"Total tasks: {len(records) * len(models) * len(strategies) * runs}")
     print()
 
     # Setup
     storage = StorageManager(base_dir=output_dir)
+    logger = BenchmarkFileLogger(base_dir=output_dir)
+    trace_dir = str(Path(output_dir) / "traces")
     strategy_instances = {cls.__name__: cls() for cls in strategies}
     all_results: list[DetailedRunResult] = []
     start = time.time()
+
+    logger.global_info(f"Benchmark started | models={models} | strategies={[s.__name__ for s in strategies]} | puzzles={len(records)}")
 
     # Build tasks
     tasks = []
@@ -127,29 +149,35 @@ async def run(
                 continue
 
             for record in records:
-                tasks.append((strat_name, strategy, model_name, model_obj, record))
+                for run_idx in range(runs):
+                    tasks.append((strat_name, strategy, model_name, model_obj, record, run_idx))
 
     # Run with concurrency
     sem = asyncio.Semaphore(concurrency)
     done_count = 0
 
-    async def run_one(strat_name, strategy, model_name, model_obj, record):
+    async def run_one(strat_name, strategy, model_name, model_obj, record, run_idx):
         nonlocal done_count
         url = record["puzzlink_url"]
         pid = record["pid"]
         puzzle = Puzzle.from_url(url)
         puzzle_id = f"{puzzle.pid}_{puzzle.id}"
+        if runs > 1:
+            puzzle_id = f"{puzzle_id}_run{run_idx}"
 
         # Skip if already completed
         cached = storage.lookup(strategy.strategy_id, model_name, puzzle_id)
         if cached == "completed":
             done_count += 1
             elapsed = time.time() - start
+            logger.task_skip(model_name, strat_name, puzzle_id)
             print(
                 f"  [{done_count}/{len(tasks)}] SKIP | {model_name} | {strat_name} | "
                 f"{pid} | cached | [{elapsed:.0f}s elapsed]"
             )
             return None
+
+        logger.task_start(model_name, strat_name, puzzle_id)
 
         async with sem:
             result = await run_strategy(
@@ -158,11 +186,20 @@ async def run(
                 model_obj=model_obj,
                 model_name=model_name,
                 storage=storage,
+                logger=logger,
+                max_steps=max_steps,
+                puzzle_id_override=puzzle_id,
+                run_number=run_idx,
+                seed=seed,
+                trace_dir=trace_dir,
             )
             done_count += 1
             s = result.summary
             status = "PASS" if s.is_success else ("ERR" if s.error_type else "FAIL")
             elapsed = time.time() - start
+
+            logger.task_end(model_name, strat_name, puzzle_id, status, s.duration_seconds, s.total_requests, len(s.parsed_moves))
+
             print(
                 f"  [{done_count}/{len(tasks)}] {status} | {model_name} | {strat_name} | "
                 f"{pid} | {s.duration_seconds:.1f}s | {s.total_requests} reqs | "
@@ -180,11 +217,13 @@ async def run(
         if isinstance(r, DetailedRunResult):
             all_results.append(r)
         elif isinstance(r, Exception):
+            logger.global_info(f"Task exception: {type(r).__name__}: {r}")
             print(f"  Task failed with: {type(r).__name__}: {r}")
 
     # Summary
     elapsed = time.time() - start
     passed = sum(1 for r in all_results if r.summary.is_success)
+    logger.global_info(f"Benchmark complete | {passed}/{len(all_results)} passed | {elapsed:.1f}s")
     print(f"\nDone in {elapsed:.1f}s — {passed}/{len(all_results)} passed")
 
     return all_results
@@ -200,9 +239,16 @@ __all__ = [
     "DetailedRunResult",
     "TokenUsage",
     "StorageManager",
+    "BenchmarkFileLogger",
     "TaskPool",
     "DirectAskStrategy",
     "BasicAgenticSolve",
     "get_model",
     "supports_tools",
+    "StepRecord",
+    "RunRecord",
+    "TraceHeader",
+    "TraceStep",
+    "TraceSummary",
+    "TraceWriter",
 ]

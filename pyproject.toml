@@ -24,13 +24,15 @@ dependencies = [
     "javascript",   # Node.js bridge for pzpr.js
     "gymnasium",    # RL environment
     "pydantic-ai",  # LLM agent framework
+    "python-dotenv>=1.2.2",
 ]
 
 [project.optional-dependencies]
 # LLM provider clients (install the ones you need)
 anthropic = ["anthropic"]
 openai = ["openai"]
-all = ["anthropic", "openai"]
+bedrock = ["boto3", "mypy-boto3-bedrock-runtime"]
+all = ["anthropic", "openai", "boto3"]
 
 [project.urls]
 Homepage = "https://github.com/approximatelabs/pencil-puzzle-bench"

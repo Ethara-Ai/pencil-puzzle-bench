@@ -59,6 +59,7 @@ def load_dataset(name: str = "golden") -> List[Dict]:
         "golden": "golden_300.jsonl",
         "golden_300": "golden_300.jsonl",
         "golden_30": "golden_30.jsonl",
+        "my_dataset": "my_dataset.jsonl",
     }
 
     if name in dataset_files:
