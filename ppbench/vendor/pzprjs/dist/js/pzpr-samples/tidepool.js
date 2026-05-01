@@ -1,0 +1,4 @@
+/*! @license pzpr.js v97b55929 (c) 2009-2026 sabo2, MIT license
+ *   https://github.com/sabo2/pzprv3 */
+ui.debug.addRules("tidepool",[{rules:"",history:""},{rules:"",history:""}]),ui.debug.addDebugData("tidepool",{url:"5/5/r2j1m",failcheck:[["cs2x2","pzprv3/tidepool/5/5/. . . . . /. . . . . /. . 2 . . /. . 1 . . /. . . . . /# # . . . /# # . . . /. . . . . /. . . . . /. . . . . /"],["cuDivide","pzprv3/tidepool/5/5/. . . . . /. . . . . /. . 2 . . /. . 1 . . /. . . . . /. . . . . /# # # # # /. . . . . /. . . . . /. . . . . /"],["tpDepthNe","pzprv3/tidepool/5/5/. . . . . /. . . . . /. . 2 . . /. . 1 . . /. . . . . /. . . . . /. . . . . /. . . . . /. . . . . /. . # . . /"],[null,"pzprv3/tidepool/5/5/. . . . . /. . . . . /. . 2 . . /. . 1 . . /. . . . . /. . . . . /. # # # . /. . . . . /. . . . . /. . . . . /"]]});
+//# sourceMappingURL=tidepool.js.map
